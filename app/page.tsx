@@ -1,337 +1,271 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import EyeTracker, { ProctoringViolation } from './components/EyeTracker';
+import ChatWidget from './components/ChatWidget';
 
-interface ChatMessage {
-  role: 'user' | 'model';
-  parts: { text: string }[];
-}
+/* ── Sample exam content ─────────────────────────────────────────────── */
 
-interface InlinePart {
-  text: string;
-  bold?: boolean;
-  italic?: boolean;
-  code?: boolean;
-}
+const EXAM_QUESTIONS = [
+  {
+    id: 1,
+    text: 'What is the time complexity of binary search on a sorted array of n elements?',
+    options: ['O(n)', 'O(log n)', 'O(n log n)', 'O(1)'],
+    points: 5,
+  },
+  {
+    id: 2,
+    text: 'Which data structure uses LIFO (Last In, First Out) ordering?',
+    options: ['Queue', 'Linked List', 'Stack', 'Heap'],
+    points: 5,
+  },
+  {
+    id: 3,
+    text: 'What does HTTP stand for?',
+    options: [
+      'HyperText Transfer Protocol',
+      'High Transfer Technology Protocol',
+      'Hyperlink Text Transmission Protocol',
+      'HyperText Transmission Process',
+    ],
+    points: 5,
+  },
+  {
+    id: 4,
+    text: 'In object-oriented programming, what is encapsulation?',
+    options: [
+      'The ability to inherit properties from parent classes',
+      'Bundling data and methods that operate on it into a single unit',
+      'Overriding methods in derived classes',
+      'Creating multiple instances of a class',
+    ],
+    points: 10,
+  },
+  {
+    id: 5,
+    text: 'Which sorting algorithm has an average-case complexity of O(n log n)?',
+    options: ['Bubble Sort', 'Selection Sort', 'Merge Sort', 'Insertion Sort'],
+    points: 5,
+  },
+  {
+    id: 6,
+    text: 'What is a primary key in a relational database?',
+    options: [
+      'A key used to encrypt data',
+      'A column that uniquely identifies each row in a table',
+      'The first column in any database table',
+      'A foreign reference to another table',
+    ],
+    points: 10,
+  },
+];
 
-interface TextSegment {
-  type: 'text';
-  content: string;
-}
+const EXAM_DURATION = 45 * 60; // 45 minutes
 
-interface CodeSegment {
-  type: 'code';
-  language?: string;
-  content: string;
-}
+/* ── Component ─────────────────────────────────────────────────────────── */
 
-type Segment = TextSegment | CodeSegment;
+export default function ProctorPage() {
+  const [examStarted, setExamStarted] = useState(false);
+  const [violations, setViolations] = useState<ProctoringViolation[]>([]);
+  const [activeAlert, setActiveAlert] = useState<ProctoringViolation | null>(null);
+  const [timeLeft, setTimeLeft] = useState(EXAM_DURATION);
+  const [answers, setAnswers] = useState<Record<number, string>>({});
+  const alertTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-const formatInline = (text: string): InlinePart[] => {
-  const inlineRegex = /(\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`)/g;
-  const parts: InlinePart[] = [];
-  let cursor = 0;
+  const addViolation = useCallback((v: ProctoringViolation) => {
+    setViolations((prev) => [...prev, v]);
+    if (alertTimerRef.current) clearTimeout(alertTimerRef.current);
+    setActiveAlert(v);
+    alertTimerRef.current = setTimeout(() => setActiveAlert(null), 4000);
+  }, []);
 
-  for (const match of text.matchAll(inlineRegex)) {
-    const token = match[0];
-    const index = match.index ?? 0;
-
-    if (index > cursor) {
-      parts.push({ text: text.slice(cursor, index) });
-    }
-
-    if (token.startsWith('**')) {
-      parts.push({ text: token.slice(2, -2), bold: true });
-    } else if (token.startsWith('*')) {
-      parts.push({ text: token.slice(1, -1), italic: true });
-    } else {
-      parts.push({ text: token.slice(1, -1), code: true });
-    }
-
-    cursor = index + token.length;
-  }
-
-  if (cursor < text.length) {
-    parts.push({ text: text.slice(cursor) });
-  }
-
-  return parts.length > 0 ? parts : [{ text }];
-};
-
-const splitSegments = (content: string): Segment[] => {
-  const lines = content.split('\n');
-  const segments: Segment[] = [];
-  let codeBuffer: string[] = [];
-  let textBuffer: string[] = [];
-  let language = '';
-  let inCodeBlock = false;
-
-  const pushTextBuffer = () => {
-    if (textBuffer.length > 0) {
-      segments.push({ type: 'text', content: textBuffer.join('\n') });
-      textBuffer = [];
-    }
-  };
-
-  const pushCodeBuffer = () => {
-    segments.push({
-      type: 'code',
-      language: language || undefined,
-      content: codeBuffer.join('\n'),
-    });
-    codeBuffer = [];
-    language = '';
-  };
-
-  for (const line of lines) {
-    if (line.trimStart().startsWith('```')) {
-      if (inCodeBlock) {
-        pushCodeBuffer();
-      } else {
-        pushTextBuffer();
-        language = line.replace(/`/g, '').trim();
-      }
-      inCodeBlock = !inCodeBlock;
-      continue;
-    }
-
-    if (inCodeBlock) {
-      codeBuffer.push(line);
-    } else {
-      textBuffer.push(line);
-    }
-  }
-
-  if (inCodeBlock) {
-    textBuffer.push('```' + (language ? language : ''));
-    textBuffer.push(...codeBuffer);
-  }
-
-  pushTextBuffer();
-
-  return segments;
-};
-
-const renderTextBlock = (content: string) => {
-  const lines = content.split('\n');
-
-  return lines.map((line, index) => {
-    const trimmed = line.trim();
-
-    if (!trimmed) {
-      return <div key={`empty-${index}`} className="message-gap" aria-hidden />;
-    }
-
-    if (trimmed.startsWith('### ')) {
-      return (
-        <h4 key={`h3-${index}`} className="message-h3">
-          {trimmed.slice(4)}
-        </h4>
-      );
-    }
-
-    if (trimmed.startsWith('## ')) {
-      return (
-        <h3 key={`h2-${index}`} className="message-h2">
-          {trimmed.slice(3)}
-        </h3>
-      );
-    }
-
-    if (trimmed.startsWith('# ')) {
-      return (
-        <h2 key={`h1-${index}`} className="message-h1">
-          {trimmed.slice(2)}
-        </h2>
-      );
-    }
-
-    if (trimmed.startsWith('- ') || trimmed.startsWith('* ')) {
-      return (
-        <div key={`li-${index}`} className="message-li">
-          <span className="message-bullet" aria-hidden>
-            ▸
-          </span>
-          <span>{formatInline(trimmed.slice(2)).map((part, idx) => renderInlinePart(part, idx))}</span>
-        </div>
-      );
-    }
-
-    return (
-      <p key={`p-${index}`} className="message-p">
-        {formatInline(line).map((part, idx) => renderInlinePart(part, idx))}
-      </p>
-    );
-  });
-};
-
-const renderInlinePart = (part: InlinePart, index: number) => {
-  if (part.code) {
-    return (
-      <code key={index} className="inline-code">
-        {part.text}
-      </code>
-    );
-  }
-
-  if (part.bold) {
-    return (
-      <strong key={index} className="font-semibold text-white">
-        {part.text}
-      </strong>
-    );
-  }
-
-  if (part.italic) {
-    return (
-      <em key={index} className="italic text-sky-100/95">
-        {part.text}
-      </em>
-    );
-  }
-
-  return <span key={index}>{part.text}</span>;
-};
-
-export default function ChatApplication() {
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [input, setInput] = useState('');
-  const [isLoading, setIsLoading] = useState(false);
-  const [selectedModel, setSelectedModel] = useState('gemma-4-26b-a4b-it');
-  const messagesEndRef = useRef<HTMLDivElement>(null);
-
+  // Exam countdown
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, isLoading]);
+    if (!examStarted || timeLeft <= 0) return;
+    const t = setInterval(() => setTimeLeft((s) => s - 1), 1000);
+    return () => clearInterval(t);
+  }, [examStarted, timeLeft]);
 
-  const parsedMessages = useMemo(
-    () =>
-      messages.map((message) => ({
-        ...message,
-        segments: splitSegments(message.parts[0].text),
-      })),
-    [messages],
-  );
-
-  const sendMessage = async (e?: React.FormEvent) => {
-    e?.preventDefault();
-    if (!input.trim() || isLoading) return;
-
-    const userMessage: ChatMessage = { role: 'user', parts: [{ text: input }] };
-    const currentHistory = [...messages, userMessage];
-
-    setMessages(currentHistory);
-    setInput('');
-    setIsLoading(true);
-
-    try {
-      const res = await fetch('/api/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ contents: currentHistory, model: selectedModel }),
-      });
-
-      const data = await res.json();
-
-      if (data.success) {
-        setMessages((prev) => [...prev, { role: 'model', parts: [{ text: data.text }] }]);
-      } else {
-        setMessages((prev) => [
-          ...prev,
-          { role: 'model', parts: [{ text: '⚠️ Connection error. Please check your API key settings.' }] },
-        ]);
-      }
-    } catch (error) {
-      console.error('Network error', error);
-      setMessages((prev) => [...prev, { role: 'model', parts: [{ text: '⚠️ Network error. Could not reach the server.' }] }]);
-    } finally {
-      setIsLoading(false);
-    }
+  const formatTime = (s: number) => {
+    const m = Math.floor(s / 60);
+    const sec = s % 60;
+    return `${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
   };
 
+  const criticalCount = violations.filter((v) => v.severity === 'critical').length;
+  const warningCount = violations.filter((v) => v.severity === 'warning').length;
+
+  /* ── Start screen ──────────────────────────────────────────────────── */
+  if (!examStarted) {
+    return (
+      <main className="start-shell">
+        <div className="orb orb-cyan" aria-hidden />
+        <div className="orb orb-purple" aria-hidden />
+        <div className="start-card">
+          <div className="start-badge">🎯 ProctorAI</div>
+          <h1 className="start-title">Computer Vision Proctored Exam</h1>
+          <p className="start-desc">
+            This exam is monitored in real time using AI-powered computer vision. Make sure your face is
+            clearly visible and well-lit before beginning.
+          </p>
+
+          <ul className="start-rules">
+            <li>
+              <span className="rule-icon">👁️</span>
+              <span>Eye movement &amp; gaze direction continuously tracked</span>
+            </li>
+            <li>
+              <span className="rule-icon">🔄</span>
+              <span>Tab switching and window-focus loss logged as violations</span>
+            </li>
+            <li>
+              <span className="rule-icon">👥</span>
+              <span>Multiple faces in frame flagged immediately</span>
+            </li>
+            <li>
+              <span className="rule-icon">🚪</span>
+              <span>Extended face absence from camera recorded</span>
+            </li>
+          </ul>
+
+          <div className="start-meta">
+            <span>⏱ Duration: <strong>45 minutes</strong></span>
+            <span>📝 Questions: <strong>{EXAM_QUESTIONS.length}</strong></span>
+            <span>💡 Open AI chat available during exam</span>
+          </div>
+
+          <button onClick={() => setExamStarted(true)} className="start-btn">
+            Start Proctored Exam →
+          </button>
+        </div>
+      </main>
+    );
+  }
+
+  /* ── Exam screen ───────────────────────────────────────────────────── */
   return (
-    <main className="futuristic-shell">
-      <div className="orb orb-cyan" aria-hidden />
-      <div className="orb orb-purple" aria-hidden />
+    <main className="proctor-shell">
+      {/* ── Top status bar ── */}
+      <header className="proctor-topbar">
+        <div className="topbar-left">
+          <span className="topbar-logo">🎯 ProctorAI</span>
+          <span className="topbar-live">● LIVE</span>
+        </div>
 
-      <section className="chat-frame">
-        <header className="chat-header">
-          <div>
-            <p className="header-chip">Neural Chat Interface</p>
-            <h1 className="header-title">Gemma 4 Dual-Core</h1>
-            <p className="header-subtitle">Responsive, readable and optimized for long AI answers.</p>
+        <div className="topbar-center">Computer Science Assessment</div>
+
+        <div className="topbar-right">
+          <div
+            className={`topbar-violations ${violations.length > 0 ? 'has-violations' : ''}`}
+            title={`${criticalCount} critical, ${warningCount} warning`}
+          >
+            {criticalCount > 0 && <span className="viol-crit-badge">{criticalCount} 🚨</span>}
+            {warningCount > 0 && <span className="viol-warn-badge">{warningCount} ⚠️</span>}
+            {violations.length === 0 && <span className="viol-clear">✓ No violations</span>}
+          </div>
+          <div className={`topbar-timer ${timeLeft < 300 ? 'timer-urgent' : ''}`}>
+            {formatTime(timeLeft)}
+          </div>
+        </div>
+      </header>
+
+      {/* ── Violation alert banner ── */}
+      {activeAlert && (
+        <div
+          className={`proctor-alert ${activeAlert.severity === 'critical' ? 'alert-critical' : 'alert-warning'}`}
+          role="alert"
+        >
+          <span className="alert-icon">{activeAlert.severity === 'critical' ? '🚨' : '⚠️'}</span>
+          <strong>{activeAlert.label}</strong>
+          <span> — This event has been recorded.</span>
+        </div>
+      )}
+
+      {/* ── Main layout ── */}
+      <div className="proctor-body">
+        {/* Exam content */}
+        <section className="exam-area">
+          <div className="exam-instructions">
+            <h2 className="exam-section-title">Section 1 · Multiple Choice</h2>
+            <p className="exam-section-sub">
+              Select the best answer for each question. Each answer is automatically saved.
+            </p>
           </div>
 
-          <div className="header-controls">
-            <label className="model-select-wrap">
-              <span className="sr-only">Select model</span>
-              <select value={selectedModel} onChange={(e) => setSelectedModel(e.target.value)} className="model-select">
-                <option value="gemma-4-26b-a4b-it">Gemma 4 (26B)</option>
-                <option value="gemma-4-31b-it">Gemma 4 (31B)</option>
-              </select>
-            </label>
-
-            <div className="status-pill">
-              <span className="status-dot" />
-              <span>Online</span>
-            </div>
-          </div>
-        </header>
-
-        <div className="chat-log">
-          {parsedMessages.length === 0 ? (
-            <div className="empty-state">System online. Select a model and start your prompt.</div>
-          ) : (
-            parsedMessages.map((msg, index) => (
-              <article key={index} className={`message-row ${msg.role === 'user' ? 'message-row-user' : 'message-row-model'}`}>
-                <div className={`message-bubble ${msg.role === 'user' ? 'message-bubble-user' : 'message-bubble-model'}`}>
-                  {msg.segments.map((segment, segmentIndex) => {
-                    if (segment.type === 'code') {
-                      return (
-                        <div key={`code-${segmentIndex}`} className="code-block-wrap">
-                          {segment.language && <span className="code-lang">{segment.language}</span>}
-                          <pre className="code-block">
-                            <code>{segment.content}</code>
-                          </pre>
-                        </div>
-                      );
-                    }
-
-                    return <div key={`text-${segmentIndex}`}>{renderTextBlock(segment.content)}</div>;
+          <div className="exam-questions">
+            {EXAM_QUESTIONS.map((q) => (
+              <div key={q.id} className="exam-q">
+                <p className="exam-q-text">
+                  <strong className="exam-q-num">Q{q.id}.</strong> {q.text}
+                  <span className="exam-q-pts">[{q.points} pts]</span>
+                </p>
+                <div className="exam-q-options">
+                  {q.options.map((opt, oi) => {
+                    const id = `q${q.id}-opt${oi}`;
+                    return (
+                      <label
+                        key={oi}
+                        htmlFor={id}
+                        className={`exam-option ${answers[q.id] === opt ? 'exam-option-selected' : ''}`}
+                      >
+                        <input
+                          id={id}
+                          type="radio"
+                          name={`q-${q.id}`}
+                          value={opt}
+                          checked={answers[q.id] === opt}
+                          onChange={() => setAnswers((prev) => ({ ...prev, [q.id]: opt }))}
+                          className="exam-radio"
+                        />
+                        <span className="exam-option-letter">{String.fromCharCode(65 + oi)}.</span>
+                        <span>{opt}</span>
+                      </label>
+                    );
                   })}
                 </div>
-              </article>
-            ))
-          )}
-
-          {isLoading && (
-            <article className="message-row message-row-model">
-              <div className="message-bubble message-bubble-model typing">
-                <span className="typing-dot" />
-                <span className="typing-dot" />
-                <span className="typing-dot" />
               </div>
-            </article>
-          )}
+            ))}
+          </div>
 
-          <div ref={messagesEndRef} />
-        </div>
-
-        <footer className="composer-wrap">
-          <form onSubmit={sendMessage} className="composer-form">
-            <textarea
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              placeholder="Type your prompt..."
-              className="composer-input"
-              rows={2}
-            />
-            <button type="submit" disabled={isLoading || !input.trim()} className="composer-button">
-              Send
+          <div className="exam-submit-row">
+            <button className="exam-submit-btn" onClick={() => alert('Exam submitted! Violations: ' + violations.length)}>
+              Submit Exam
             </button>
-          </form>
-        </footer>
-      </section>
+            <span className="exam-submit-note">
+              {Object.keys(answers).length} / {EXAM_QUESTIONS.length} answered
+            </span>
+          </div>
+        </section>
+
+        {/* ── Right panel: camera + violations ── */}
+        <aside className="proctor-sidebar">
+          <EyeTracker onViolation={addViolation} active={examStarted} />
+
+          {violations.length > 0 && (
+            <div className="viol-log">
+              <div className="viol-log-header">Violations Log</div>
+              <div className="viol-log-list">
+                {[...violations].reverse().slice(0, 8).map((v) => (
+                  <div key={v.id} className={`viol-entry viol-entry-${v.severity}`}>
+                    <span className="viol-entry-icon">
+                      {v.severity === 'critical' ? '🚨' : '⚠️'}
+                    </span>
+                    <div className="viol-entry-info">
+                      <span className="viol-entry-label">{v.label}</span>
+                      <span className="viol-entry-time">
+                        {v.timestamp.toLocaleTimeString()}
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </aside>
+      </div>
+
+      {/* ── Floating chat widget ── */}
+      <ChatWidget />
     </main>
   );
 }
