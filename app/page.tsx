@@ -11,9 +11,12 @@ export default function ChatApplication() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  
+  // Defaulting to the 26B model
+  const [selectedModel, setSelectedModel] = useState('gemma-4-26b-a4b-it');
+  
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // Auto-scroll to the latest message
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
@@ -33,7 +36,7 @@ export default function ChatApplication() {
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ contents: currentHistory }),
+        body: JSON.stringify({ contents: currentHistory, model: selectedModel }),
       });
 
       const data = await res.json();
@@ -55,11 +58,20 @@ export default function ChatApplication() {
     <main className="min-h-screen bg-slate-950 flex flex-col items-center justify-center p-4 font-sans">
       <div className="w-full max-w-4xl bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl flex flex-col h-[85vh]">
         
-        {/* Header Section */}
+        {/* Header Section with Gemma 4 Dropdown */}
         <div className="p-5 border-b border-slate-800 bg-slate-800/40 flex justify-between items-center rounded-t-2xl">
           <div>
-            <h1 className="text-xl font-bold text-emerald-400">Gemma 4 System</h1>
-            <p className="text-xs text-slate-400 mt-1">Model: gemma-4-26b-a4b-it</p>
+            <h1 className="text-xl font-bold text-emerald-400">Gemma 4 Dual-Core</h1>
+            <div className="mt-2">
+              <select
+                value={selectedModel}
+                onChange={(e) => setSelectedModel(e.target.value)}
+                className="bg-slate-950 text-slate-300 border border-slate-700 rounded-lg px-3 py-1.5 text-xs focus:outline-none focus:border-emerald-500/50 cursor-pointer"
+              >
+                <option value="gemma-4-26b-a4b-it">Gemma 4 (26B)</option>
+                <option value="gemma-4-31b-it">Gemma 4 (31B)</option>
+              </select>
+            </div>
           </div>
           <div className="flex items-center gap-2">
             <span className="relative flex h-3 w-3">
@@ -74,7 +86,7 @@ export default function ChatApplication() {
         <div className="flex-1 overflow-y-auto p-5 space-y-6 scroll-smooth">
           {messages.length === 0 ? (
             <div className="h-full flex items-center justify-center text-slate-500 text-sm">
-              System Online. Awaiting input.
+              System Online. Select your Gemma 4 model to begin.
             </div>
           ) : (
             messages.map((msg, index) => (
