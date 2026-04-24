@@ -1,19 +1,23 @@
 import { GoogleGenAI } from "@google/genai";
 import { NextResponse } from 'next/server';
 
-// Passing the explicit object and key to satisfy TypeScript's strict rules
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || '' });
 
 export async function POST(req: Request) {
   try {
-    const { contents } = await req.json();
+    // 1. Extract BOTH the chat history and the chosen model from the frontend
+    const { contents, model } = await req.json();
     
     if (!contents || !Array.isArray(contents)) {
       return NextResponse.json({ error: 'Invalid conversation history' }, { status: 400 });
     }
 
+    // 2. Set a fallback just in case the frontend doesn't send a model
+    const targetModel = model || "gemma-4-26b-a4b-it";
+
+    // 3. Pass the dynamic targetModel to the AI
     const response = await ai.models.generateContent({
-      model: "gemma-4-26b-a4b-it",
+      model: targetModel,
       contents: contents,
     });
 
