@@ -35,6 +35,7 @@ const formatInline = (text: string): InlinePart[] => {
   let match = inlineRegex.exec(text);
 
   while (match) {
+  for (const match of text.matchAll(inlineRegex)) {
     const token = match[0];
     const index = match.index ?? 0;
 
