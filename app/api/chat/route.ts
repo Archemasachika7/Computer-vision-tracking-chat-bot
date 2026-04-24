@@ -1,8 +1,8 @@
 import { GoogleGenAI } from "@google/genai";
 import { NextResponse } from 'next/server';
 
-// The SDK automatically looks for process.env.GEMINI_API_KEY in the Vercel environment
-const ai = new GoogleGenAI();
+// Passing the explicit object and key to satisfy TypeScript's strict rules
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || '' });
 
 export async function POST(req: Request) {
   try {
