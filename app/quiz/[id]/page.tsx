@@ -47,10 +47,26 @@ export default function TakeQuizPage() {
         setQuiz(data);
         setTimeLeft(data.duration_minutes * 60);
       });
-    supabase.from('quiz_questions').select('*, quiz_options(*)').eq('quiz_id', quizId)
+    supabase.from('quiz_questions').select('*, options:quiz_options(*)').eq('quiz_id', quizId)
       .order('order_index')
-      .then(({ data }) => setQuestions((data ?? []) as QuestionWithOptions[]));
+      .then(({ data }) => {
+        const normalized = ((data ?? []) as Array<QuestionWithOptions & { options?: QuizOption[] }>).map(q => ({
+          ...q,
+          options: q.options ?? [],
+        }));
+        setQuestions(normalized);
+      });
   }, [quizId, nav]);
+
+  const parseMsqAnswer = (answer: string | null): string[] => {
+    if (!answer) return [];
+    try {
+      const parsed = JSON.parse(answer);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  };
 
   // Countdown
   useEffect(() => {
@@ -105,7 +121,7 @@ export default function TakeQuizPage() {
     if (q.type === 'integer') {
       correct = String(userAns ?? '').trim() === (q.correct_answer ?? '').trim();
     } else if (q.type === 'msq') {
-      const correctSet = JSON.parse(q.correct_answer ?? '[]') as string[];
+      const correctSet = parseMsqAnswer(q.correct_answer);
       const userSet    = (userAns as string[] | undefined) ?? [];
       correct = correctSet.length === userSet.length && correctSet.every(v => userSet.includes(v));
       correctAnswer = correctSet.join(', ');
@@ -137,7 +153,7 @@ export default function TakeQuizPage() {
       if (q.type === 'integer') {
         correct = String(userAns ?? '').trim() === (q.correct_answer ?? '').trim();
       } else if (q.type === 'msq') {
-        const correctSet = JSON.parse(q.correct_answer ?? '[]') as string[];
+        const correctSet = parseMsqAnswer(q.correct_answer);
         const userSet    = (userAns as string[] | undefined) ?? [];
         correct = correctSet.length === userSet.length && correctSet.every(v => userSet.includes(v));
       } else {
