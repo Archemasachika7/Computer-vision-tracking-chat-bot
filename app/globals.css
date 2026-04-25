@@ -207,19 +207,43 @@ body {
 .alert-warning  { background: rgba(234,179,8,.15); border-bottom: 1px solid rgba(234,179,8,.35); color: #fde68a; }
 .alert-icon     { font-size: 1.1rem; flex-shrink: 0; }
 
-/* Body layout */
-.proctor-body {
-  flex: 1;
+/* Screen share status badges */
+.topbar-screen-ok  { font-size:.72rem; color:#4ade80; background:rgba(74,222,128,.1); border:1px solid rgba(74,222,128,.3); border-radius:999px; padding:.15rem .55rem; }
+.topbar-screen-err { font-size:.72rem; color:#f87171; background:rgba(239,68,68,.1);  border:1px solid rgba(239,68,68,.3);  border-radius:999px; padding:.15rem .55rem; }
+
+/* ══════════════════════════════════════════════════
+   TOP ROW: camera (left) + violations (right)
+   stacked ABOVE the exam — no more narrow sidebar
+══════════════════════════════════════════════════ */
+.proctor-top-row {
   display: flex;
   gap: 0;
-  overflow: hidden;
+  border-bottom: 1px solid rgba(100,116,139,.2);
+  background: rgba(2,6,23,.6);
+  height: 260px;        /* fixed height so cam feed is large enough */
+  flex-shrink: 0;
 }
 
-/* Exam content area */
+.proctor-cam-col {
+  width: 360px;
+  flex-shrink: 0;
+  border-right: 1px solid rgba(100,116,139,.2);
+  padding: .6rem;
+  display: flex;
+  flex-direction: column;
+}
+
+.proctor-viol-col {
+  flex: 1;
+  overflow-y: auto;
+  padding: .6rem;
+}
+
+/* Exam content area — full width below the top row */
 .exam-area {
   flex: 1;
   overflow-y: auto;
-  padding: clamp(1rem, 2.5vw, 2rem);
+  padding: clamp(1rem, 2vw, 1.75rem);
 }
 
 .exam-instructions { margin-bottom: 1.5rem; }
@@ -283,17 +307,37 @@ body {
 .exam-submit-btn:hover { transform: translateY(-1px); }
 .exam-submit-note { font-size: .85rem; color: rgba(148,163,184,.7); }
 
-/* Right sidebar: camera + violations */
-.proctor-sidebar {
-  width: 240px;
-  flex-shrink: 0;
-  border-left: 1px solid rgba(100,116,139,.2);
-  background: rgba(15,23,42,.6);
-  display: flex;
-  flex-direction: column;
-  gap: 0;
-  overflow-y: auto;
-  padding: .85rem;
+/* ═══════════════════════════════════════════════════════════════
+   PERMISSION STEP UI (start screen)
+═══════════════════════════════════════════════════════════════ */
+.perm-step        { margin-top: 1rem; display: flex; flex-direction: column; gap: .75rem; }
+.perm-label       { font-size: .8rem; letter-spacing: .07em; text-transform: uppercase; color: #7dd3fc; margin: 0; font-weight: 600; }
+.perm-hint        { font-size: .88rem; color: rgba(203,213,225,.8); margin: 0; }
+.perm-warning-box {
+  background: rgba(234,179,8,.1);
+  border: 1px solid rgba(234,179,8,.35);
+  border-radius: .75rem;
+  padding: .75rem 1rem;
+  font-size: .88rem;
+  color: #fde68a;
+  line-height: 1.6;
+}
+.perm-error-box {
+  background: rgba(239,68,68,.12);
+  border: 1px solid rgba(239,68,68,.35);
+  border-radius: .75rem;
+  padding: .75rem 1rem;
+  font-size: .88rem;
+  color: #fca5a5;
+  line-height: 1.6;
+}
+.perm-success-box {
+  background: rgba(74,222,128,.1);
+  border: 1px solid rgba(74,222,128,.35);
+  border-radius: .75rem;
+  padding: .75rem 1rem;
+  font-size: .88rem;
+  color: #86efac;
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -385,11 +429,21 @@ body {
   animation: spin .75s linear infinite;
 }
 
+.et-header      { display:flex; align-items:center; gap:.45rem; padding:.4rem .7rem; background:rgba(30,41,59,.7); border-bottom:1px solid rgba(100,116,139,.2); font-size:.7rem; text-transform:uppercase; letter-spacing:.06em; color:#94a3b8; }
+.et-tech-badge  { margin-left:auto; font-size:.65rem; background:rgba(129,140,248,.15); border:1px solid rgba(129,140,248,.3); border-radius:999px; padding:.1rem .45rem; color:#a5b4fc; }
+
+.et-status-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: .4rem .7rem;
+  gap: .5rem;
+  flex-wrap: wrap;
+}
 .et-status {
   display: flex;
   align-items: center;
-  gap: .45rem;
-  padding: .45rem .7rem;
+  gap: .4rem;
   font-size: .78rem;
   font-weight: 500;
 }
@@ -399,16 +453,20 @@ body {
   border-radius: 999px;
   flex-shrink: 0;
 }
+.et-gaze-info { font-size:.7rem; color:#4ade80; background:rgba(74,222,128,.1); border:1px solid rgba(74,222,128,.25); border-radius:999px; padding:.1rem .45rem; }
+.et-gaze-away { font-size:.7rem; color:#facc15; background:rgba(234,179,8,.1);  border:1px solid rgba(234,179,8,.25);  border-radius:999px; padding:.1rem .45rem; }
 
 /* ═══════════════════════════════════════════════════════════════
    VIOLATIONS LOG (sidebar)
 ═══════════════════════════════════════════════════════════════ */
 .viol-log {
-  margin-top: .75rem;
   border-radius: .85rem;
   border: 1px solid rgba(100,116,139,.25);
   background: rgba(2,6,23,.6);
   overflow: hidden;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
 }
 .viol-log-header {
   padding: .4rem .7rem;
@@ -419,7 +477,9 @@ body {
   background: rgba(30,41,59,.5);
   border-bottom: 1px solid rgba(100,116,139,.2);
 }
-.viol-log-list { display: flex; flex-direction: column; }
+.viol-log-count { font-size:.68rem; color:#475569; font-weight:400; text-transform:none; letter-spacing:0; }
+.viol-log-list  { display: flex; flex-direction: column; flex:1; overflow-y:auto; }
+.viol-empty     { padding:.65rem .7rem; font-size:.78rem; color:#475569; }
 .viol-entry {
   display: flex;
   align-items: flex-start;
