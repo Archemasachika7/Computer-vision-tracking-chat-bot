@@ -11,21 +11,28 @@ interface QuestionWithOptions extends QuizQuestion {
   options: QuizOption[];
 }
 
+interface CheckResult {
+  correct: boolean;
+  correctAnswer: string;
+}
+
 export default function TakeQuizPage() {
   const { user, loading } = useAuth();
-  const router   = useParams();
-  const nav      = useRouter();
-  const quizId   = router.id as string;
+  const params  = useParams();
+  const nav     = useRouter();
+  const quizId  = params.id as string;
 
-  const [quiz,      setQuiz]      = useState<Quiz | null>(null);
-  const [questions, setQuestions] = useState<QuestionWithOptions[]>([]);
-  const [answers,   setAnswers]   = useState<Record<string, string | string[]>>({});
-  const [timeLeft,  setTimeLeft]  = useState(0);
-  const [started,   setStarted]   = useState(false);
-  const [submitted, setSubmitted] = useState(false);
-  const [score,     setScore]     = useState<{ earned: number; total: number } | null>(null);
+  const [quiz,       setQuiz]       = useState<Quiz | null>(null);
+  const [questions,  setQuestions]  = useState<QuestionWithOptions[]>([]);
+  const [answers,    setAnswers]    = useState<Record<string, string | string[]>>({});
+  const [checked,    setChecked]    = useState<Record<string, CheckResult>>({});
+  const [timeLeft,   setTimeLeft]   = useState(0);
+  const [started,    setStarted]    = useState(false);
+  const [submitted,  setSubmitted]  = useState(false);
+  const [score,      setScore]      = useState<{ earned: number; total: number } | null>(null);
   const [violations, setViolations] = useState<ProctoringViolation[]>([]);
   const [activeAlert, setActiveAlert] = useState<ProctoringViolation | null>(null);
+  const [attemptId,  setAttemptId]  = useState<string | null>(null);
   const alertRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
@@ -36,11 +43,10 @@ export default function TakeQuizPage() {
     if (!quizId) return;
     supabase.from('quizzes').select('*').eq('id', quizId).single()
       .then(({ data }) => {
-        if (!data) { nav.push('/quiz'); return; }
+        if (!data) { nav.push('/quiz/join'); return; }
         setQuiz(data);
         setTimeLeft(data.duration_minutes * 60);
       });
-
     supabase.from('quiz_questions').select('*, quiz_options(*)').eq('quiz_id', quizId)
       .order('order_index')
       .then(({ data }) => setQuestions((data ?? []) as QuestionWithOptions[]));
@@ -64,29 +70,65 @@ export default function TakeQuizPage() {
     alertRef.current = setTimeout(() => setActiveAlert(null), 4000);
   }, []);
 
-  const handleAnswer = (qid: string, val: string, type: string, checked?: boolean) => {
+  // Creates the attempt row immediately so admin can see live sessions
+  const startQuiz = async () => {
+    if (!user || !quiz) return;
+    const id = crypto.randomUUID();
+    await supabase.from('quiz_attempts').insert({
+      id,
+      quiz_id: quiz.id,
+      user_id: user.id,
+      started_at: new Date().toISOString(),
+    });
+    setAttemptId(id);
+    setStarted(true);
+  };
+
+  const handleAnswer = (qid: string, val: string, type: string, chk?: boolean) => {
     if (type === 'msq') {
       setAnswers(prev => {
         const cur = (prev[qid] as string[] | undefined) ?? [];
-        return { ...prev, [qid]: checked ? [...cur, val] : cur.filter(v => v !== val) };
+        return { ...prev, [qid]: chk ? [...cur, val] : cur.filter(v => v !== val) };
       });
     } else {
       setAnswers(prev => ({ ...prev, [qid]: val }));
     }
+    // Clear previous check result when answer changes so user can re-check
+    setChecked(prev => { const n = { ...prev }; delete n[qid]; return n; });
+  };
+
+  const checkAnswer = (q: QuestionWithOptions) => {
+    const userAns = answers[q.id];
+    let correct = false;
+    let correctAnswer = q.correct_answer ?? '';
+
+    if (q.type === 'integer') {
+      correct = String(userAns ?? '').trim() === (q.correct_answer ?? '').trim();
+    } else if (q.type === 'msq') {
+      const correctSet = JSON.parse(q.correct_answer ?? '[]') as string[];
+      const userSet    = (userAns as string[] | undefined) ?? [];
+      correct = correctSet.length === userSet.length && correctSet.every(v => userSet.includes(v));
+      correctAnswer = correctSet.join(', ');
+    } else {
+      correct = userAns === q.correct_answer;
+    }
+
+    setChecked(prev => ({ ...prev, [q.id]: { correct, correctAnswer } }));
   };
 
   const handleSubmit = async () => {
     if (submitted || !quiz || !user) return;
     setSubmitted(true);
 
+    const aid = attemptId ?? crypto.randomUUID();
+    if (!attemptId) {
+      await supabase.from('quiz_attempts').insert({
+        id: aid, quiz_id: quiz.id, user_id: user.id,
+        started_at: new Date().toISOString(),
+      });
+    }
+
     let earned = 0, total = 0;
-    const attempt_id = crypto.randomUUID();
-
-    const { data: attempt } = await supabase.from('quiz_attempts').insert({
-      id: attempt_id, quiz_id: quiz.id, user_id: user.id,
-      submitted_at: new Date().toISOString(),
-    }).select().single();
-
     for (const q of questions) {
       total += q.points;
       const userAns = answers[q.id];
@@ -104,18 +146,18 @@ export default function TakeQuizPage() {
 
       if (correct) earned += q.points;
 
-      if (attempt) {
-        await supabase.from('quiz_responses').insert({
-          attempt_id: attempt.id, question_id: q.id,
-          answer: JSON.stringify(userAns), is_correct: correct,
-          points_earned: correct ? q.points : 0,
-        });
-      }
+      await supabase.from('quiz_responses').insert({
+        attempt_id: aid, question_id: q.id,
+        answer: JSON.stringify(userAns), is_correct: correct,
+        points_earned: correct ? q.points : 0,
+      });
     }
 
-    if (attempt) {
-      await supabase.from('quiz_attempts').update({ score: earned, total_points: total }).eq('id', attempt.id);
-    }
+    await supabase.from('quiz_attempts').update({
+      score: earned,
+      total_points: total,
+      submitted_at: new Date().toISOString(),
+    }).eq('id', aid);
 
     setScore({ earned, total });
   };
@@ -139,9 +181,11 @@ export default function TakeQuizPage() {
         </div>
         <p className="result-pct">{Math.round((score.earned / score.total) * 100)}% correct</p>
         {violations.length > 0 && (
-          <p className="result-violations">⚠️ {violations.length} proctoring violation{violations.length > 1 ? 's' : ''} recorded</p>
+          <p className="result-violations">
+            ⚠️ {violations.length} proctoring violation{violations.length > 1 ? 's' : ''} recorded
+          </p>
         )}
-        <button className="auth-btn" style={{ marginTop: '1.5rem' }} onClick={() => nav.push('/quiz')}>
+        <button className="auth-btn" style={{ marginTop: '1.5rem' }} onClick={() => nav.push('/quiz/join')}>
           Back to Quizzes
         </button>
       </div>
@@ -162,15 +206,17 @@ export default function TakeQuizPage() {
           <span>📝 <strong>{questions.length} questions</strong></span>
           <span>👁️ Camera monitored</span>
         </div>
-        <button className="start-btn" onClick={() => setStarted(true)}>Start Quiz →</button>
+        <p className="start-notice">
+          You can check each answer on the spot as you go, or submit everything at the end.
+        </p>
+        <button className="start-btn" onClick={startQuiz}>Start Quiz →</button>
       </div>
     </main>
   );
 
-  /* ── Quiz screen (same proctor layout as exam) ── */
+  /* ── Quiz screen ── */
   return (
     <main className="proctor-shell">
-      {/* Top bar */}
       <header className="proctor-topbar">
         <div className="topbar-left">
           <span className="topbar-logo">📝 {quiz.title}</span>
@@ -197,7 +243,9 @@ export default function TakeQuizPage() {
         </div>
         <div className="proctor-viol-col">
           <div className="viol-log">
-            <div className="viol-log-header">Violations <span className="viol-log-count">{violations.length}</span></div>
+            <div className="viol-log-header">
+              Violations <span className="viol-log-count">{violations.length}</span>
+            </div>
             <div className="viol-log-list">
               {violations.length === 0
                 ? <div className="viol-empty">Clean so far</div>
@@ -218,52 +266,87 @@ export default function TakeQuizPage() {
 
       <div className="exam-area">
         <div className="exam-questions">
-          {questions.map((q, qi) => (
-            <div key={q.id} className="exam-q">
-              <p className="exam-q-text">
-                <strong className="exam-q-num">Q{qi + 1}.</strong> {q.question_text}
-                <span className="exam-q-pts">[{q.points} pts] <em className="q-type-tag">{q.type.toUpperCase()}</em></span>
-              </p>
+          {questions.map((q, qi) => {
+            const result = checked[q.id];
+            return (
+              <div key={q.id} className={`exam-q ${result ? (result.correct ? 'q-correct' : 'q-wrong') : ''}`}>
+                <p className="exam-q-text">
+                  <strong className="exam-q-num">Q{qi + 1}.</strong> {q.question_text}
+                  <span className="exam-q-pts">[{q.points} pts] <em className="q-type-tag">{q.type.toUpperCase()}</em></span>
+                </p>
 
-              {q.type === 'integer' && (
-                <input type="number" className="auth-input" style={{ maxWidth: '200px' }}
-                  placeholder="Your answer"
-                  value={(answers[q.id] as string) ?? ''}
-                  onChange={e => handleAnswer(q.id, e.target.value, 'integer')} />
-              )}
+                {q.type === 'integer' && (
+                  <input
+                    type="number"
+                    className="auth-input"
+                    style={{ maxWidth: '200px' }}
+                    placeholder="Your answer"
+                    value={(answers[q.id] as string) ?? ''}
+                    onChange={e => handleAnswer(q.id, e.target.value, 'integer')}
+                  />
+                )}
 
-              {(q.type === 'mcq' || q.type === 'msq') && (
-                <div className="exam-q-options">
-                  {q.options.sort((a, b) => a.order_index - b.order_index).map((opt, oi) => {
-                    const sel = q.type === 'mcq'
-                      ? answers[q.id] === opt.option_text
-                      : ((answers[q.id] as string[] | undefined) ?? []).includes(opt.option_text);
-                    return (
-                      <label key={opt.id} className={`exam-option ${sel ? 'exam-option-selected' : ''}`}>
-                        <input
-                          type={q.type === 'mcq' ? 'radio' : 'checkbox'}
-                          name={`q-${q.id}`}
-                          checked={sel}
-                          onChange={e => handleAnswer(q.id, opt.option_text, q.type, e.target.checked)}
-                          className="exam-radio"
-                        />
-                        <span className="exam-option-letter">{String.fromCharCode(65 + oi)}.</span>
-                        <span>{opt.option_text}</span>
-                      </label>
-                    );
-                  })}
+                {(q.type === 'mcq' || q.type === 'msq') && (
+                  <div className="exam-q-options">
+                    {q.options.sort((a, b) => a.order_index - b.order_index).map((opt, oi) => {
+                      const sel = q.type === 'mcq'
+                        ? answers[q.id] === opt.option_text
+                        : ((answers[q.id] as string[] | undefined) ?? []).includes(opt.option_text);
+                      return (
+                        <label key={opt.id} className={`exam-option ${sel ? 'exam-option-selected' : ''}`}>
+                          <input
+                            type={q.type === 'mcq' ? 'radio' : 'checkbox'}
+                            name={`q-${q.id}`}
+                            checked={sel}
+                            onChange={e => handleAnswer(q.id, opt.option_text, q.type, e.target.checked)}
+                            className="exam-radio"
+                          />
+                          <span className="exam-option-letter">{String.fromCharCode(65 + oi)}.</span>
+                          <span>{opt.option_text}</span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {/* Per-question check */}
+                <div className="q-check-row">
+                  <button
+                    className="q-check-btn"
+                    onClick={() => checkAnswer(q)}
+                    disabled={
+                      answers[q.id] === undefined ||
+                      answers[q.id] === '' ||
+                      (Array.isArray(answers[q.id]) && (answers[q.id] as string[]).length === 0)
+                    }
+                  >
+                    Check Answer
+                  </button>
+                  {result && (
+                    <div className={`q-result ${result.correct ? 'q-result-correct' : 'q-result-wrong'}`}>
+                      {result.correct
+                        ? '✅ Correct!'
+                        : <><span>❌ Wrong</span> — Correct: <strong>{result.correctAnswer}</strong></>
+                      }
+                    </div>
+                  )}
                 </div>
-              )}
-            </div>
-          ))}
+              </div>
+            );
+          })}
         </div>
 
         <div className="exam-submit-row">
-          <button className="exam-submit-btn" onClick={() => { if (confirm('Submit the quiz?')) handleSubmit(); }}>
+          <button
+            className="exam-submit-btn"
+            onClick={() => { if (confirm('Submit the quiz? This cannot be undone.')) handleSubmit(); }}
+          >
             Submit Quiz
           </button>
           <span className="exam-submit-note">
             {Object.keys(answers).length} / {questions.length} answered
+            {Object.keys(checked).length > 0 &&
+              ` · ${Object.values(checked).filter(r => r.correct).length}/${Object.keys(checked).length} checked correct`}
           </span>
         </div>
       </div>
