@@ -277,6 +277,7 @@ export default function ChatWidget() {
                   <div className={`cw-bubble ${msg.role === 'user' ? 'cw-bubble-user' : 'cw-bubble-ai'}`}>
                     {/* Image preview */}
                     {msg.uiPreview && (
+                      // eslint-disable-next-line @next/next/no-img-element
                       <img src={msg.uiPreview} alt="attachment" className="cw-img-preview" />
                     )}
                     {/* File name badge (non-image) */}
@@ -319,6 +320,7 @@ export default function ChatWidget() {
               ) : attached ? (
                 <>
                   {attached.preview ? (
+                    // eslint-disable-next-line @next/next/no-img-element
                     <img src={attached.preview} alt="preview" className="cw-attach-thumb" />
                   ) : (
                     <span className="cw-attach-icon">📎</span>

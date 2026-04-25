@@ -7,7 +7,9 @@ export type ViolationType =
   | 'window_blur'
   | 'no_face'
   | 'looking_away'
-  | 'multiple_faces';
+  | 'multiple_faces'
+  | 'screen_share_stopped'
+  | 'wrong_screen_share';
 
 export interface ProctoringViolation {
   id: string;
@@ -21,44 +23,103 @@ const VIOLATION_META: Record<
   ViolationType,
   { label: string; severity: 'warning' | 'critical'; cooldown: number }
 > = {
-  tab_switch:     { label: 'Tab Switch Detected',      severity: 'critical', cooldown: 1500 },
-  window_blur:    { label: 'Window Focus Lost',         severity: 'warning',  cooldown: 3000 },
-  no_face:        { label: 'Face Not Detected',         severity: 'critical', cooldown: 5000 },
-  looking_away:   { label: 'Looking Away from Screen',  severity: 'warning',  cooldown: 5000 },
-  multiple_faces: { label: 'Multiple Faces Detected',   severity: 'critical', cooldown: 3000 },
+  tab_switch:            { label: 'Tab Switch Detected',          severity: 'critical', cooldown: 1500 },
+  window_blur:           { label: 'Window Focus Lost',             severity: 'warning',  cooldown: 3000 },
+  no_face:               { label: 'Face Not Detected',             severity: 'critical', cooldown: 5000 },
+  looking_away:          { label: 'Looking Away from Screen',      severity: 'warning',  cooldown: 4000 },
+  multiple_faces:        { label: 'Multiple Faces Detected',       severity: 'critical', cooldown: 3000 },
+  screen_share_stopped:  { label: 'Screen Share Stopped',          severity: 'critical', cooldown: 2000 },
+  wrong_screen_share:    { label: 'Must Share Entire Screen',      severity: 'critical', cooldown: 5000 },
 };
+
+export interface ScreenShareStatus {
+  active: boolean;
+  surface: string | null;   // 'monitor' | 'window' | 'browser' | null
+  error: string | null;
+}
 
 interface EyeTrackerProps {
   onViolation: (v: ProctoringViolation) => void;
+  onScreenShareStatus: (s: ScreenShareStatus) => void;
   active: boolean;
 }
 
-export default function EyeTracker({ onViolation, active }: EyeTrackerProps) {
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const streamRef = useRef<MediaStream | null>(null);
-  const rafRef = useRef<number | null>(null);
-  const lastViolRef = useRef<Partial<Record<ViolationType, number>>>({});
-  const absenceFrames = useRef(0);
-  const awayFrames = useRef(0);
+/* ── Gaze thresholds (iris ratio: 0 = far left, 1 = far right) ── */
+const GAZE_LEFT_THRESHOLD  = 0.33;
+const GAZE_RIGHT_THRESHOLD = 0.67;
+const GAZE_UP_THRESHOLD    = 0.30;
+const GAZE_DOWN_THRESHOLD  = 0.70;
 
-  const [camStatus, setCamStatus] = useState<'init' | 'ready' | 'denied'>('init');
-  const [mlStatus, setMlStatus] = useState<'loading' | 'ready' | 'failed'>('loading');
-  const [faceState, setFaceState] = useState<'unknown' | 'ok' | 'absent' | 'away' | 'multiple'>('unknown');
+export default function EyeTracker({ onViolation, onScreenShareStatus, active }: EyeTrackerProps) {
+  const videoRef        = useRef<HTMLVideoElement>(null);
+  const canvasRef       = useRef<HTMLCanvasElement>(null);
+  const screenVideoRef  = useRef<HTMLVideoElement>(null);
+  const camStreamRef    = useRef<MediaStream | null>(null);
+  const screenStreamRef = useRef<MediaStream | null>(null);
+  const rafRef          = useRef<number | null>(null);
+  const lastViolRef     = useRef<Partial<Record<ViolationType, number>>>({});
+  const absenceFrames   = useRef(0);
+  const awayFrames      = useRef(0);
 
-  const fire = useCallback(
-    (type: ViolationType) => {
-      const now = Date.now();
-      const last = lastViolRef.current[type] ?? 0;
-      if (now - last < VIOLATION_META[type].cooldown) return;
-      lastViolRef.current[type] = now;
-      const { label, severity } = VIOLATION_META[type];
-      onViolation({ id: `${type}-${now}`, type, label, severity, timestamp: new Date() });
-    },
-    [onViolation],
-  );
+  const [camStatus,    setCamStatus]    = useState<'init' | 'ready' | 'denied'>('init');
+  const [mlStatus,     setMlStatus]     = useState<'loading' | 'ready' | 'failed'>('loading');
+  const [faceState,    setFaceState]    = useState<'unknown' | 'ok' | 'absent' | 'away' | 'multiple'>('unknown');
+  const [gazeInfo,     setGazeInfo]     = useState<string>('');
 
-  // Tab visibility + window focus
+  const fire = useCallback((type: ViolationType) => {
+    const now  = Date.now();
+    const last = lastViolRef.current[type] ?? 0;
+    if (now - last < VIOLATION_META[type].cooldown) return;
+    lastViolRef.current[type] = now;
+    const { label, severity } = VIOLATION_META[type];
+    onViolation({ id: `${type}-${now}`, type, label, severity, timestamp: new Date() });
+  }, [onViolation]);
+
+  /* ── Screen share setup ── */
+  const startScreenShare = useCallback(async () => {
+    try {
+      const stream = await navigator.mediaDevices.getDisplayMedia({
+        video: { displaySurface: 'monitor' } as any,
+        audio: false,
+      });
+
+      const track    = stream.getVideoTracks()[0];
+      const settings = track.getSettings() as any;
+      const surface  = (settings.displaySurface as string) ?? null;
+
+      if (surface && surface !== 'monitor') {
+        // User shared a window or browser tab — not the full screen
+        stream.getTracks().forEach((t) => t.stop());
+        fire('wrong_screen_share');
+        onScreenShareStatus({ active: false, surface, error: 'Please share your ENTIRE SCREEN (monitor), not a window or tab.' });
+        return;
+      }
+
+      screenStreamRef.current = stream;
+      if (screenVideoRef.current) {
+        screenVideoRef.current.srcObject = stream;
+      }
+
+      onScreenShareStatus({ active: true, surface: surface ?? 'monitor', error: null });
+
+      // Detect if the user stops sharing
+      track.addEventListener('ended', () => {
+        fire('screen_share_stopped');
+        onScreenShareStatus({ active: false, surface: null, error: 'Screen share was stopped.' });
+        screenStreamRef.current = null;
+      });
+    } catch {
+      onScreenShareStatus({ active: false, surface: null, error: 'Screen share permission denied.' });
+    }
+  }, [fire, onScreenShareStatus]);
+
+  /* ── Expose startScreenShare so parent can trigger it ── */
+  useEffect(() => {
+    if (active) startScreenShare();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active]);
+
+  /* ── Tab visibility + window focus ── */
   useEffect(() => {
     if (!active) return;
     const onHide = () => { if (document.hidden) fire('tab_switch'); };
@@ -71,16 +132,16 @@ export default function EyeTracker({ onViolation, active }: EyeTrackerProps) {
     };
   }, [active, fire]);
 
-  // Camera stream
+  /* ── Camera stream ── */
   useEffect(() => {
     if (!active) return;
     let dead = false;
 
     navigator.mediaDevices
-      .getUserMedia({ video: { width: 320, height: 240, facingMode: 'user' } })
+      .getUserMedia({ video: { width: 640, height: 480, facingMode: 'user' } })
       .then((stream) => {
         if (dead) { stream.getTracks().forEach((t) => t.stop()); return; }
-        streamRef.current = stream;
+        camStreamRef.current = stream;
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
           videoRef.current.play().catch(() => {});
@@ -91,126 +152,188 @@ export default function EyeTracker({ onViolation, active }: EyeTrackerProps) {
 
     return () => {
       dead = true;
-      streamRef.current?.getTracks().forEach((t) => t.stop());
+      camStreamRef.current?.getTracks().forEach((t) => t.stop());
     };
   }, [active]);
 
-  // Face detection via face-api.js
+  /* ── MediaPipe Face Landmarker (iris detection) ── */
   useEffect(() => {
     if (!active || camStatus !== 'ready') return;
     let dead = false;
 
-    // Models served from jsDelivr CDN (included in the face-api.js npm package)
-    const MODEL_URL = 'https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/weights';
+    const WASM_URL  = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm';
+    const MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
 
-    import('face-api.js')
-      .then(async (faceapi) => {
+    (async () => {
+      try {
+        const { FaceLandmarker, FilesetResolver, DrawingUtils } = await import('@mediapipe/tasks-vision');
         if (dead) return;
-        try {
-          await Promise.all([
-            faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
-            faceapi.nets.faceLandmark68TinyNet.loadFromUri(MODEL_URL),
-          ]);
+
+        const vision = await FilesetResolver.forVisionTasks(WASM_URL);
+        if (dead) return;
+
+        const landmarker = await FaceLandmarker.createFromOptions(vision, {
+          baseOptions: {
+            modelAssetPath: MODEL_URL,
+            delegate: 'CPU',   // CPU avoids COEP/SharedArrayBuffer requirement
+          },
+          runningMode: 'VIDEO',
+          numFaces: 3,
+          outputFaceBlendshapes: false,
+        });
+        if (dead) { landmarker.close(); return; }
+
+        setMlStatus('ready');
+
+        let lastTs = -1;
+
+        const loop = () => {
           if (dead) return;
-          setMlStatus('ready');
+          const video  = videoRef.current;
+          const canvas = canvasRef.current;
+          if (!video || !canvas || video.readyState < 2) {
+            rafRef.current = requestAnimationFrame(loop);
+            return;
+          }
 
-          const opts = new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.45 });
+          const now = performance.now();
+          if (now === lastTs) { rafRef.current = requestAnimationFrame(loop); return; }
+          lastTs = now;
 
-          const loop = async () => {
-            if (dead) return;
-            const video = videoRef.current;
-            const canvas = canvasRef.current;
-            if (!video || !canvas || video.readyState < 2) {
-              rafRef.current = requestAnimationFrame(loop);
-              return;
-            }
+          canvas.width  = video.videoWidth;
+          canvas.height = video.videoHeight;
 
-            const detections = await faceapi
-              .detectAllFaces(video, opts)
-              .withFaceLandmarks(true);
+          const result = landmarker.detectForVideo(video, now);
+          const ctx    = canvas.getContext('2d')!;
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-            if (dead) return;
+          const faces = result.faceLandmarks ?? [];
+          const count = faces.length;
 
-            // Draw face + eye overlays on canvas
-            const ctx = canvas.getContext('2d');
-            if (ctx) {
-              canvas.width = video.videoWidth;
-              canvas.height = video.videoHeight;
-              ctx.clearRect(0, 0, canvas.width, canvas.height);
+          /* ── Draw face mesh + iris ── */
+          faces.forEach((lm) => {
+            const W = canvas.width;
+            const H = canvas.height;
 
-              const scale = { width: video.videoWidth, height: video.videoHeight };
-              const resized = faceapi.resizeResults(detections, scale);
+            const pt = (i: number) => ({ x: lm[i].x * W, y: lm[i].y * H });
 
-              resized.forEach(({ detection, landmarks }) => {
-                const b = detection.box;
-                ctx.strokeStyle = '#22d3ee';
-                ctx.lineWidth = 2;
-                ctx.strokeRect(b.x, b.y, b.width, b.height);
+            // Face oval
+            ctx.beginPath();
+            FaceLandmarker.FACE_LANDMARKS_FACE_OVAL.forEach(({ start, end }) => {
+              const s = pt(start); const e = pt(end);
+              ctx.moveTo(s.x, s.y); ctx.lineTo(e.x, e.y);
+            });
+            ctx.strokeStyle = 'rgba(34,211,238,0.6)';
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
 
-                [landmarks.getLeftEye(), landmarks.getRightEye()].forEach((eye) => {
-                  ctx.beginPath();
-                  eye.forEach((pt, i) => (i === 0 ? ctx.moveTo(pt.x, pt.y) : ctx.lineTo(pt.x, pt.y)));
-                  ctx.closePath();
-                  ctx.strokeStyle = '#38bdf8';
-                  ctx.lineWidth = 1.5;
-                  ctx.stroke();
-                });
+            // Left eye
+            ctx.beginPath();
+            FaceLandmarker.FACE_LANDMARKS_LEFT_EYE.forEach(({ start, end }) => {
+              const s = pt(start); const e = pt(end);
+              ctx.moveTo(s.x, s.y); ctx.lineTo(e.x, e.y);
+            });
+            ctx.strokeStyle = 'rgba(56,189,248,0.85)';
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
+
+            // Right eye
+            ctx.beginPath();
+            FaceLandmarker.FACE_LANDMARKS_RIGHT_EYE.forEach(({ start, end }) => {
+              const s = pt(start); const e = pt(end);
+              ctx.moveTo(s.x, s.y); ctx.lineTo(e.x, e.y);
+            });
+            ctx.strokeStyle = 'rgba(56,189,248,0.85)';
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
+
+            // Iris circles (landmarks 468 = left iris center, 473 = right iris center)
+            if (lm[468] && lm[473]) {
+              [468, 473].forEach((idx) => {
+                const c = pt(idx);
+                ctx.beginPath();
+                ctx.arc(c.x, c.y, 5, 0, Math.PI * 2);
+                ctx.fillStyle = 'rgba(250,204,21,0.9)';
+                ctx.fill();
               });
             }
+          });
 
-            const count = detections.length;
-
-            if (count === 0) {
-              absenceFrames.current++;
-              setFaceState('absent');
-              if (absenceFrames.current >= 15) {
-                fire('no_face');
-                absenceFrames.current = 0;
-              }
-            } else if (count > 1) {
+          /* ── Violation logic ── */
+          if (count === 0) {
+            absenceFrames.current++;
+            setFaceState('absent');
+            setGazeInfo('');
+            if (absenceFrames.current >= 20) {
+              fire('no_face');
               absenceFrames.current = 0;
-              awayFrames.current = 0;
-              setFaceState('multiple');
-              fire('multiple_faces');
-            } else {
-              absenceFrames.current = 0;
-              // Gaze heuristic: nose tip offset vs jaw centerline
-              const lm = detections[0].landmarks;
-              const jaw = lm.getJawOutline();   // 17 pts: [0]=left ear, [16]=right ear
-              const nose = lm.getNose();         // 9 pts: [6]=nose tip center
-              const faceCenter = (jaw[0].x + jaw[16].x) / 2;
-              const faceWidth = Math.abs(jaw[16].x - jaw[0].x);
-              const deviation = faceWidth > 10 ? (nose[6].x - faceCenter) / faceWidth : 0;
-
-              if (Math.abs(deviation) > 0.18) {
-                awayFrames.current++;
-                setFaceState('away');
-                if (awayFrames.current >= 10) {
-                  fire('looking_away');
-                  awayFrames.current = 0;
-                }
-              } else {
-                awayFrames.current = 0;
-                setFaceState('ok');
-              }
             }
+          } else if (count > 1) {
+            absenceFrames.current = 0;
+            awayFrames.current    = 0;
+            setFaceState('multiple');
+            setGazeInfo('');
+            fire('multiple_faces');
+          } else {
+            absenceFrames.current = 0;
+            const lm = faces[0];
 
-            // ~10 fps detection to balance accuracy and performance
-            setTimeout(() => {
-              if (!dead) rafRef.current = requestAnimationFrame(loop);
-            }, 100);
-          };
+            // ── Iris gaze calculation ──────────────────────────────
+            // Landmark indices (478-pt model):
+            //   Left iris center : 468  Right iris center : 473
+            //   Left eye inner   : 133  Left eye outer    : 33
+            //   Right eye inner  : 362  Right eye outer   : 263
+            //   Left eye top     : 159  Left eye bottom   : 145
 
-          rafRef.current = requestAnimationFrame(loop);
-        } catch (err) {
-          console.error('Face-api model load failed:', err);
-          if (!dead) setMlStatus('failed');
-        }
-      })
-      .catch((err) => {
-        console.error('face-api.js import failed:', err);
+            const gazeX_L = lm[468] && lm[33] && lm[133]
+              ? (lm[468].x - lm[133].x) / Math.max(Math.abs(lm[33].x - lm[133].x), 0.001)
+              : 0.5;
+            const gazeX_R = lm[473] && lm[263] && lm[362]
+              ? (lm[473].x - lm[362].x) / Math.max(Math.abs(lm[263].x - lm[362].x), 0.001)
+              : 0.5;
+            const gazeY = lm[468] && lm[159] && lm[145]
+              ? (lm[468].y - lm[159].y) / Math.max(Math.abs(lm[145].y - lm[159].y), 0.001)
+              : 0.5;
+
+            const avgGazeX = (gazeX_L + gazeX_R) / 2;
+
+            const lookingAway =
+              avgGazeX < GAZE_LEFT_THRESHOLD  ||
+              avgGazeX > GAZE_RIGHT_THRESHOLD ||
+              gazeY    < GAZE_UP_THRESHOLD    ||
+              gazeY    > GAZE_DOWN_THRESHOLD;
+
+            const dirH = avgGazeX < GAZE_LEFT_THRESHOLD ? 'Looking Left'
+                       : avgGazeX > GAZE_RIGHT_THRESHOLD ? 'Looking Right' : '';
+            const dirV = gazeY < GAZE_UP_THRESHOLD ? 'Looking Up'
+                       : gazeY > GAZE_DOWN_THRESHOLD ? 'Looking Down' : '';
+            setGazeInfo([dirH, dirV].filter(Boolean).join(' + ') || 'Center');
+
+            if (lookingAway) {
+              awayFrames.current++;
+              setFaceState('away');
+              if (awayFrames.current >= 12) {
+                fire('looking_away');
+                awayFrames.current = 0;
+              }
+            } else {
+              awayFrames.current = 0;
+              setFaceState('ok');
+            }
+          }
+
+          // ~15 fps is enough for proctoring; keeps CPU cool
+          setTimeout(() => {
+            if (!dead) rafRef.current = requestAnimationFrame(loop);
+          }, 66);
+        };
+
+        rafRef.current = requestAnimationFrame(loop);
+      } catch (err) {
+        console.error('MediaPipe init failed:', err);
         if (!dead) setMlStatus('failed');
-      });
+      }
+    })();
 
     return () => {
       dead = true;
@@ -225,7 +348,6 @@ export default function EyeTracker({ onViolation, active }: EyeTrackerProps) {
     away:     { text: 'Looking Away',          color: '#facc15' },
     multiple: { text: 'Multiple Faces!',       color: '#fb923c' },
   };
-
   const s = STATUS[faceState];
 
   return (
@@ -233,6 +355,7 @@ export default function EyeTracker({ onViolation, active }: EyeTrackerProps) {
       <div className="et-header">
         <span className="et-dot-live" />
         <span className="et-title">Proctoring Camera</span>
+        <span className="et-tech-badge">MediaPipe Iris</span>
       </div>
 
       <div className="et-feed">
@@ -242,25 +365,38 @@ export default function EyeTracker({ onViolation, active }: EyeTrackerProps) {
           <>
             <video ref={videoRef} muted playsInline className="et-video" />
             <canvas ref={canvasRef} className="et-canvas" />
+            {/* hidden screen share video (used for stream tracking only) */}
+            <video ref={screenVideoRef} muted playsInline style={{ display: 'none' }} />
+
             {camStatus === 'init' && (
               <div className="et-notice">Requesting camera…</div>
             )}
             {camStatus === 'ready' && mlStatus === 'loading' && (
               <div className="et-overlay">
                 <div className="et-spinner" />
-                <span>Loading AI models…</span>
+                <span>Loading MediaPipe models…</span>
               </div>
             )}
             {mlStatus === 'failed' && (
-              <div className="et-overlay et-fallback">Tab tracking active</div>
+              <div className="et-overlay et-fallback">
+                ⚠️ AI unavailable — tab tracking active
+              </div>
             )}
           </>
         )}
       </div>
 
-      <div className="et-status" style={{ color: s.color }}>
-        <span className="et-status-dot" style={{ background: s.color }} />
-        {s.text}
+      <div className="et-status-row">
+        <div className="et-status" style={{ color: s.color }}>
+          <span className="et-status-dot" style={{ background: s.color }} />
+          {s.text}
+        </div>
+        {gazeInfo && faceState === 'ok' && (
+          <span className="et-gaze-info">👁 {gazeInfo}</span>
+        )}
+        {gazeInfo && faceState === 'away' && (
+          <span className="et-gaze-away">⚠ {gazeInfo}</span>
+        )}
       </div>
     </div>
   );
